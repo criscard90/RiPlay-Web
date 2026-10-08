@@ -30,7 +30,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build WASM distribution
-        run: ./gradlew :composeApp:wasmJsBrowserDistribution --console=plain
+        run: |
+          chmod +x gradlew
+          ./gradlew :composeApp:wasmJsBrowserDistribution --console=plain
 
       # Il workflow distribuisce la cartella statica prodotta da Gradle.
       # window.__RIPLAY_API__ punta al worker pubblico: sostituire
