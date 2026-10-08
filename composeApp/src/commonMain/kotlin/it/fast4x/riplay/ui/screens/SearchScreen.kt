@@ -33,7 +33,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +45,7 @@ import it.fast4x.riplay.model.FeaturedArtist
 import it.fast4x.riplay.model.Song
 import it.fast4x.riplay.state.AppState
 import it.fast4x.riplay.ui.components.SongRow
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 private data class Filter(val key: String?, val label: String)
@@ -75,8 +75,7 @@ private fun kindLabel(kind: String): String = when (kind) {
 
 
 @Composable
-private fun SearchMain(state: AppState) {
-    val scope = rememberCoroutineScope()
+private fun SearchMain(state: AppState, scope: CoroutineScope) {
     var input by remember { mutableStateOf(state.searchQuery) }
 
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
@@ -375,9 +374,13 @@ private fun DetailView(state: AppState) {
 
 @Composable
 fun SearchScreen(state: AppState) {
+    // Le operazioni di rete girano su state.appScope: sopravvivono allo swap
+    // SearchMain <-> DetailView. Se fossero lanciate dallo scope di SearchMain,
+    // la coroutine di openDetail() verrebbe cancellata appena la vista dettaglio
+    // sostituisce SearchMain (e il fetch non porterebbe a termine).
     if (state.isDetailOpen) {
         DetailView(state)
         return
     }
-    SearchMain(state)
+    SearchMain(state, state.appScope)
 }

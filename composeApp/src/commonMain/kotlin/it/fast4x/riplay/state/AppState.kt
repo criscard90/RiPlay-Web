@@ -13,11 +13,23 @@ import it.fast4x.riplay.player.WebPlayer
 import it.fast4x.riplay.storage.LocalStore
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 
 enum class Page { HOME, SEARCH, FAVORITES, SETTINGS }
 
 /** Stato globale dell'app (single source of truth) */
 class AppState {
+
+    /**
+     * Scope globale per le operazioni di rete (ricerca, dettaglio).
+     * Non è legato alla composizione: le coroutine sopravvivono ai cambi di
+     * pagina/vista (es. Home -> Search, Search -> DetailView), dove lo scope di
+     * un composable verrebbe cancellato appena la composable esce.
+     */
+    val appScope = CoroutineScope(SupervisorJob())
+
     var page by mutableStateOf(Page.HOME)
 
     // --- Ricerca ---
@@ -71,6 +83,9 @@ class AppState {
             searchResults.clear()
             searchResults.addAll(response.items)
             featuredArtist = response.featured?.takeIf { it.title.isNotBlank() }
+        } catch (e: CancellationException) {
+            // Rilancia: la cancellazione dello scope non è un errore di rete.
+            throw e
         } catch (e: Exception) {
             searchError = e.message ?: "Errore di rete"
             searchResults.clear()
@@ -95,6 +110,10 @@ class AppState {
             detailItems.addAll(response.items)
             if (response.title.isNotBlank()) detailTitle = response.title
             else if (detailTitle.isBlank()) detailTitle = fallbackTitle
+        } catch (e: CancellationException) {
+            // Rilancia: altrimenti "rememberCoroutineScope left the composition"
+            // finirebbe in detailError come se fosse un errore API.
+            throw e
         } catch (e: Exception) {
             detailError = e.message ?: "Errore di rete"
         } finally {

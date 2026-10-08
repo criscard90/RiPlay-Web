@@ -30,13 +30,24 @@ const CLIENT = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
 };
 
-// Filtri di ricerca InnerTube (tab "Brani", "Video", "Album", "Artisti")
+// Filtri di ricerca InnerTube (tab "Brani", "Video", "Album", "Artisti").
+// Valori verificati con ytmusicapi (get_search_params): prefisso "EgWKAQ" +
+// 2 byte tipo (II=songs, IQ=videos, IY=albums, Ig=artists) + coda "AWoMEA4QChADEAQQCRAF".
 const SEARCH_PARAMS = {
-  songs: "EgWKAQIIAWoQEAMQBBAJEAoQEBAKEAkEDBA",
-  videos: "EgWKAQIQAWoQEAMQBBAJEAoQEBAVEAkEDBA",
-  albums: "EgWKAQIYAWoQEAMQBBAJEAoQEBAVEAkEDBA",
-  artists: "EgWKAQIgAWoQEAMQBBAJEAoQEBAVEAkEDBA",
+  songs: "EgWKAQIIAWoMEA4QChADEAQQCRAF",
+  videos: "EgWKAQIQAWoMEA4QChADEAQQCRAF",
+  albums: "EgWKAQIYAWoMEA4QChADEAQQCRAF",
+  artists: "EgWKAQIgAWoMEA4QChADEAQQCRAF",
 };
+
+/** clientVersion "1.YYYYMMDD.01.00" (formato dinamico come da ytmusicapi). */
+function clientVersion() {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `1.${y}${m}${day}.01.00`;
+}
 
 function thumb(thumbnails) {
   if (!thumbnails || thumbnails.length === 0) return "";
@@ -80,8 +91,7 @@ function collectItems(root) {
 
 /** Tipo + browseId di un item (brano / album / artista / playlist / video). */
 function itemKind(m) {
-  const sub = (m.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [])
-    .map((x) => x.text).join("");
+  const sub = subRuns(m).map((x) => x.text).join("");
   const first = sub.split("•")[0].trim().toLowerCase();
   const browse =
     m.navigationEndpoint?.browseEndpoint?.browseId ??
@@ -109,19 +119,48 @@ function extractVideoId(m) {
 
 
 
+/** Etichette di tipo che YTM antepone al sottotitolo nelle ricerche non filtrate
+ *  (es. "Brano • Caparezza", "Album • Nome • 2006"). Servono a itemKind, ma non
+ *  all'artista mostrato in UI. */
+const TYPE_LABELS = new Set([
+  "brano", "canzone", "song", "video", "album", "singolo", "single", "ep",
+  "playlist", "elenco di riproduzione", "artista", "artist", "profilo", "profile",
+  "puntata", "podcast", "episodio", "episode", "stazione", "station",
+]);
+
+/** Runs del sottotitolo: da flexColumns[1] (MRLI) oppure subtitle (two-row). */
+function subRuns(m) {
+  return (
+    m.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ??
+    m.subtitle?.runs ??
+    []
+  );
+}
+
+/** Rimuove l'etichetta di tipo iniziale (più il separatore "•") dai runs. */
+function stripTypeLabel(runs) {
+  let r = runs;
+  if (r.length > 0 && TYPE_LABELS.has((r[0].text ?? "").trim().toLowerCase())) {
+    r = r.slice(1);
+    if (r.length > 0 && (r[0].text ?? "").trim() === "•") r = r.slice(1);
+  }
+  return r;
+}
+
+
 /** Converte un item InnerTube nel nostro Song (+ tipo per la UI). */
 function toSong(m) {
   const flex = m.flexColumns ?? [];
   const title =
     flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text ??
     m.title?.runs?.[0]?.text ?? "";
-  const artistRuns =
-    flex[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [];
-  const artist = artistRuns.length > 0
-    ? (artistRuns[0].text ?? "")
-    : (m.subtitle?.runs?.[0]?.text ?? "");
+  const sub = stripTypeLabel(subRuns(m));
+  let artist = sub.length > 0 ? (sub[0].text ?? "") : "";
+  // Righe non filtrate come ["Brano", " • ", "4:15"] non riportano l'artista:
+  // il primo run resta la durata, non un nome.
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(artist.trim())) artist = "";
   let lengthText = "";
-  for (const r of artistRuns) {
+  for (const r of sub) {
     const t = (r.text ?? "").trim();
     if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) lengthText = t;
   }
@@ -159,7 +198,10 @@ async function innerTube(path, body) {
         Origin: INNERTUBE_HOST,
         Referer: `${INNERTUBE_HOST}/`,
       },
-      body: JSON.stringify({ context: { client: CLIENT }, ...body }),
+      body: JSON.stringify({
+        context: { client: { ...CLIENT, clientVersion: clientVersion() } },
+        ...body,
+      }),
     }
   );
   if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);

@@ -9,7 +9,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -24,7 +23,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun HomeScreen(state: AppState) {
-    val scope = rememberCoroutineScope()
+    val scope = state.appScope
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
         Text(
             "Ciao!",
