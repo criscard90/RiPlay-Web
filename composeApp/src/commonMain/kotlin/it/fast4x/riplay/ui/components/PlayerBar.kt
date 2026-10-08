@@ -184,8 +184,9 @@ fun PlayerBar(state: AppState) {
                 )
             }
 
-            // Espandi/nascondi video
-            if (song != null) {
+            // Espandi/nascondi video (solo in modalita' video: con l'audio
+            // puro non c'e' nulla da ingrandire)
+            if (song != null && WebPlayer.isVideoMode()) {
                 Icon(
                     Icons.Default.Fullscreen,
                     contentDescription = "Ingrandisci video",

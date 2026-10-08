@@ -15,6 +15,7 @@ data class Song(
     val kind: String = "song",      // song | album | artist | playlist | video
     val browseId: String? = null,   // per aprire artista/album
     val videoId: String? = null,    // videoId diretto quando disponibile
+    val subtitle: String = "",      // sottotitolo grezzo (es. "Singolo • 2021" per gli album)
 ) {
     /** Vere tracce riproducibili (con videoId) */
     val isPlayable: Boolean get() = (videoId ?: id.takeIf { !it.startsWith("browse:") }) != null
@@ -46,8 +47,19 @@ data class SearchResponse(
     val featured: FeaturedArtist? = null,
 )
 
+/**
+ * Sezione della pagina artista (es. "Brani in evidenza", "Album",
+ * "Singoli ed EP", "Video"): il worker separa gli shelf di YouTube Music.
+ */
+@Serializable
+data class DetailSection(
+    val title: String = "",
+    val items: List<Song> = emptyList(),
+)
+
 @Serializable
 data class BrowseResponse(
     val items: List<Song> = emptyList(),
     val title: String = "",
+    val sections: List<DetailSection> = emptyList(),
 )

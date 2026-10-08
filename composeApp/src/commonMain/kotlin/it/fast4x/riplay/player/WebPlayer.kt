@@ -29,4 +29,6 @@ expect object WebPlayer {
     fun hideHost()
     fun toggleExpand(): Boolean
     fun stop()
+    /** true se la riproduzione corrente usa il video (iframe), non l'audio puro */
+    fun isVideoMode(): Boolean
 }

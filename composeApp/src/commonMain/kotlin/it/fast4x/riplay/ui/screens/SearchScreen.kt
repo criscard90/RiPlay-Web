@@ -291,7 +291,7 @@ private fun BrowseRow(song: Song, onOpen: () -> Unit) {
                 maxLines = 1,
             )
             Text(
-                kindLabel(song.kind) + " - apri",
+                song.subtitle.ifBlank { kindLabel(song.kind) + " - apri" },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -300,7 +300,7 @@ private fun BrowseRow(song: Song, onOpen: () -> Unit) {
     }
 }
 
-/** Vista dettaglio artista/album: titolo + lista brani */
+/** Vista dettaglio artista/album: titolo + sezioni strutturate (o lista piatta) */
 @Composable
 private fun DetailView(state: AppState) {
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
@@ -343,21 +343,31 @@ private fun DetailView(state: AppState) {
                     modifier = Modifier.padding(top = 16.dp),
                 )
             }
-            state.detailItems.isNotEmpty() -> {
+            state.detailItems.isNotEmpty() || state.detailSections.isNotEmpty() -> {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    items(state.detailItems, key = { it.id }) { song ->
-                        SongRow(
-                            song = song,
-                            isActive = state.currentSong?.id == song.id,
-                            isFavorite = state.isFavorite(song),
-                            onClick = {
-                                state.play(song, items = state.detailItems.toList())
-                            },
-                            onToggleFavorite = { state.toggleFavorite(song) },
-                        )
+                    if (state.detailSections.isNotEmpty()) {
+                        // Artista: "Brani in evidenza", "Album", "Singoli ed EP", "Video"
+                        state.detailSections.forEach { section ->
+                            item(key = "section:${section.title}") {
+                                Text(
+                                    section.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                                )
+                            }
+                            items(section.items, key = { "${section.title}/${it.id}" }) { song ->
+                                DetailItem(state, song, section.items)
+                            }
+                        }
+                    } else {
+                        // Album: lista piatta delle tracce
+                        items(state.detailItems, key = { it.id }) { song ->
+                            DetailItem(state, song, state.detailItems)
+                        }
                     }
                 }
             }
@@ -367,6 +377,26 @@ private fun DetailView(state: AppState) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 16.dp),
                 )
+            }
+        }
+    }
+}
+
+/** Riga del dettaglio: suona se riproducibile, altrimenti apre album/artista */
+@Composable
+private fun DetailItem(state: AppState, song: Song, queue: List<Song>) {
+    if (song.isPlayable) {
+        SongRow(
+            song = song,
+            isActive = state.currentSong?.id == song.id,
+            isFavorite = state.isFavorite(song),
+            onClick = { state.play(song, items = queue.filter { it.isPlayable }) },
+            onToggleFavorite = { state.toggleFavorite(song) },
+        )
+    } else {
+        BrowseRow(song) {
+            song.browseId?.let { id ->
+                state.appScope.launch { state.openDetail(song.kind, id, song.title) }
             }
         }
     }

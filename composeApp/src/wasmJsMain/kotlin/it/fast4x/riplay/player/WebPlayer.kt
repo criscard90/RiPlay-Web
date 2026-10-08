@@ -21,6 +21,7 @@ external interface RiPlayJsBridge : JsAny {
     fun hideHost()
     fun toggleExpand(): Boolean
     fun stop()
+    fun isVideoMode(): Boolean
 }
 
 // Globale creato da bridge.js
@@ -41,6 +42,7 @@ actual object WebPlayer {
     actual fun hideHost() = riplay.hideHost()
     actual fun toggleExpand(): Boolean = riplay.toggleExpand()
     actual fun stop() = riplay.stop()
+    actual fun isVideoMode(): Boolean = riplay.isVideoMode()
 
     actual fun state(): PlaybackState = when (riplay.getState()) {
         1 -> PlaybackState.Playing

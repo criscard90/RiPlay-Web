@@ -30,6 +30,16 @@ const CLIENT = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
 };
 
+// Client "ANDROID" per l'endpoint /player: restituisce streamingData con URL
+// diretti (niente po_token/cipher) e sia audio/mp4 sia audio/webm.
+// Nota: TVHTML5_SIMPLY_EMBEDDED_PLAYER e' bloccato ("no longer supported").
+const PLAYER_CLIENT = {
+  clientName: "ANDROID",
+  clientVersion: "20.10.38",
+  androidSdkVersion: 34,
+  userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+};
+
 // Filtri di ricerca InnerTube (tab "Brani", "Video", "Album", "Artisti").
 // Valori verificati con ytmusicapi (get_search_params): prefisso "EgWKAQ" +
 // 2 byte tipo (II=songs, IQ=videos, IY=albums, Ig=artists) + coda "AWoMEA4QChADEAQQCRAF".
@@ -173,6 +183,10 @@ function toSong(m) {
     m.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ??
     m.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
   const { kind, browseId } = itemKind(m);
+  const subtitle = subRuns(m)
+    .map((r) => (r.text ?? "").trim())
+    .filter((t) => t && t !== "•")
+    .join(" • ");
   return {
     id: extractVideoId(m) ?? (browseId ? `browse:${browseId}` : ""),
     title,
@@ -184,6 +198,7 @@ function toSong(m) {
     kind,
     browseId,
     videoId: extractVideoId(m),
+    subtitle,
   };
 }
 
@@ -206,6 +221,72 @@ async function innerTube(path, body) {
   );
   if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
   return res.json();
+}
+
+/**
+ * Info riproduzione via client ANDROID (www.youtube.com): gli adaptiveFormats
+ * audio riportano l'URL diretto, senza signature cipher ne' po_token.
+ */
+async function playerInfo(videoId) {
+  const res = await fetch(
+    `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": PLAYER_CLIENT.userAgent,
+      },
+      body: JSON.stringify({
+        context: {
+          client: {
+            hl: CLIENT.hl,
+            gl: CLIENT.gl,
+            clientName: PLAYER_CLIENT.clientName,
+            clientVersion: PLAYER_CLIENT.clientVersion,
+            androidSdkVersion: PLAYER_CLIENT.androidSdkVersion,
+          },
+        },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      }),
+    }
+  );
+  if (!res.ok) throw new Error(`player HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * GET /stream?videoId=... -> { videoId, url, mimeType, bitrate, ... }
+ *
+ * Restituisce l'URL diretto dello stream AUDIO (solo metadati: pochi KB).
+ * Il browser lo riproduce con un <audio> element senza passare dal worker
+ * (nessun relay di traffico): la riproduzione resta solo audio.
+ * Preferenza: audio/mp4 (AAC, universale) poi audio/webm (opus, no Safari).
+ */
+async function handleStream(url) {
+  const videoId = (url.searchParams.get("videoId") || "").trim();
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return json({ error: "invalid videoId" }, 400);
+  const data = await playerInfo(videoId);
+  const status = data.playabilityStatus?.status;
+  if (status && status !== "OK") {
+    return json({ error: data.playabilityStatus.reason || "unplayable", status }, 404);
+  }
+  const audio = (data.streamingData?.adaptiveFormats || []).filter(
+    (f) => f.url && f.mimeType && f.mimeType.startsWith("audio/")
+  );
+  if (audio.length === 0) return json({ error: "no audio stream" }, 404);
+  const mp4 = audio.filter((f) => f.mimeType.startsWith("audio/mp4"));
+  const best = (mp4.length > 0 ? mp4 : audio).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  return json({
+    videoId,
+    url: best.url,
+    itag: best.itag,
+    mimeType: best.mimeType,
+    bitrate: best.bitrate || 0,
+    audioQuality: best.audioQuality || "",
+    duration: Number(data.videoDetails?.lengthSeconds || 0),
+  });
 }
 
 async function handleSearch(url) {
@@ -260,11 +341,82 @@ function toFeatured(card) {
   return { title, browseId, subtitle, thumbnail: thumb(thumbs) };
 }
 
-/** Top brani di un artista / brani di un album via /browse. */
+/** Titolo di uno shelf carousel ("Album", "Singoli ed EP", "Video", ...). */
+function carouselTitle(s) {
+  const h =
+    s.header?.musicCarouselShelfBasicHeaderRenderer ?? s.header?.musicCarouselShelfHeaderRenderer;
+  return (h?.title?.runs?.[0]?.text ?? "").trim();
+}
+
+/**
+ * Pagina artista strutturata sugli shelf che YouTube Music espone gia separati:
+ *  - musicShelfRenderer con videoId     -> "Brani in evidenza" (top songs)
+ *  - carousel "Album"                   -> album
+ *  - carousel "Singoli ed EP"           -> singoli/EP
+ *  - carousel "Video"/"Performance live" -> video
+ * Playlist e artisti correlati sono volutamente esclusi (meno rumore).
+ */
+function artistPage(data) {
+  const buckets = { songs: [], albums: [], singles: [], videos: [] };
+  const seen = new Set(); // dedup cross-sezione (stesso video/id in piu' shelf)
+  const push = (bucket, s) => {
+    const key = s.videoId || s.id;
+    if (!s.title || !key || seen.has(key)) return;
+    seen.add(key);
+    buckets[bucket].push(s);
+  };
+
+  const contents =
+    data?.contents?.singleColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content
+      ?.sectionListRenderer?.contents;
+  for (const c of contents ?? []) {
+    if (c.musicShelfRenderer) {
+      // Top songs: MRLI con watchEndpoint
+      for (const it of c.musicShelfRenderer.contents ?? []) {
+        const m = it.musicResponsiveListItemRenderer;
+        if (m) push("songs", toSong(m));
+      }
+    } else if (c.musicCarouselShelfRenderer) {
+      const shelf = c.musicCarouselShelfRenderer;
+      const t = carouselTitle(shelf).toLowerCase();
+      let bucket = null;
+      if (t.includes("album")) bucket = "albums";
+      else if (t.includes("singol") || /\bep\b/.test(t)) bucket = "singles";
+      else if (t.includes("video") || t.includes("live")) bucket = "videos";
+      if (!bucket) continue; // playlist, artisti correlati, ...
+      for (const it of shelf.contents ?? []) {
+        const m = it.musicTwoRowItemRenderer || it.musicResponsiveListItemRenderer;
+        if (!m) continue;
+        const s = toSong(m);
+        // Nei due-row l'album e' sottotitolo solo dall'anno: per gli item non
+        // canzone il "nome artista" estratto e' spesso l'anno stesso.
+        if ((bucket === "albums" || bucket === "singles") && /^\d{4}$/.test(s.artist)) s.artist = "";
+        push(bucket, s);
+      }
+    }
+  }
+
+  const sections = [];
+  if (buckets.songs.length) sections.push({ title: "Brani in evidenza", items: buckets.songs });
+  if (buckets.albums.length) sections.push({ title: "Album", items: buckets.albums });
+  if (buckets.singles.length) sections.push({ title: "Singoli ed EP", items: buckets.singles });
+  if (buckets.videos.length) sections.push({ title: "Video", items: buckets.videos });
+  return { sections, items: sections.flatMap((s) => s.items) };
+}
+
+/** Brani di un album / pagina artista strutturata via /browse. */
 async function handleBrowse(url, kind) {
   const browseId = (url.searchParams.get("browseId") || "").trim();
   if (!browseId) return json({ error: "missing browseId" }, 400);
   const data = await innerTube("browse", { browseId });
+  const header = headerTitle(data);
+
+  if (kind === "artist") {
+    const { items, sections } = artistPage(data);
+    return json({ items, title: header, sections });
+  }
+
+  // Album: solo tracce riproducibili, in sequenza
   const items = [];
   const seen = new Set();
   for (const m of collectItems(data)) {
@@ -275,7 +427,6 @@ async function handleBrowse(url, kind) {
     s.kind = "song";
     items.push(s);
   }
-  const header = headerTitle(data);
   return json({ items, title: header });
 }
 
@@ -291,13 +442,20 @@ function headerTitle(data) {
       title = o.musicDetailHeaderRenderer.title?.runs?.[0]?.text ?? "";
       return;
     }
+    if (o.musicImmersiveHeaderRenderer) {
+      // Header degli artisti (nome artista in alto)
+      title = o.musicImmersiveHeaderRenderer.title?.runs?.[0]?.text ?? "";
+      return;
+    }
     if (o.musicEditablePlaylistDetailHeaderRenderer) {
       title = o.musicEditablePlaylistDetailHeaderRenderer.header
         ?.musicDetailHeaderRenderer?.title?.runs?.[0]?.text ?? "";
       return;
     }
     for (const v of Object.values(o)) walk(v);
-  })(data?.contents ?? data);
+    // Scansiona tutto il payload: l'header dell'artista (musicImmersiveHeader
+    // Renderer) vive in data.header, fuori dai contents.
+  })(data);
   return title;
 }
 
@@ -313,6 +471,9 @@ export default {
       }
       if ((url.pathname === "/artist" || url.pathname === "/album") && request.method === "GET") {
         return await handleBrowse(url, url.pathname.slice(1));
+      }
+      if (url.pathname === "/stream" && request.method === "GET") {
+        return await handleStream(url);
       }
       if (url.pathname === "/" || url.pathname === "/health") {
         return json({ ok: true, service: "riplay-proxy" });

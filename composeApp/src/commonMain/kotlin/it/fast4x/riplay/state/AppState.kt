@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import it.fast4x.riplay.api.ApiClient
+import it.fast4x.riplay.model.DetailSection
 import it.fast4x.riplay.model.FeaturedArtist
 import it.fast4x.riplay.model.Song
 import it.fast4x.riplay.player.WebPlayer
@@ -43,6 +44,8 @@ class AppState {
     // --- Dettaglio artista/album ---
     var detailTitle by mutableStateOf("")
     var detailItems = mutableStateListOf<Song>()
+    /** Sezioni strutturate della pagina artista (top songs, album, singoli/EP...) */
+    var detailSections = mutableStateListOf<DetailSection>()
     var detailLoading by mutableStateOf(false)
     var detailError by mutableStateOf<String?>(null)
 
@@ -101,6 +104,7 @@ class AppState {
     suspend fun openDetail(kind: String, browseId: String, fallbackTitle: String = "") {
         detailTitle = fallbackTitle
         detailItems.clear()
+        detailSections.clear()
         detailError = null
         detailLoading = true
         try {
@@ -108,6 +112,8 @@ class AppState {
             else ApiClient.album(browseId)
             detailItems.clear()
             detailItems.addAll(response.items)
+            detailSections.clear()
+            detailSections.addAll(response.sections)
             if (response.title.isNotBlank()) detailTitle = response.title
             else if (detailTitle.isBlank()) detailTitle = fallbackTitle
         } catch (e: CancellationException) {
@@ -124,6 +130,7 @@ class AppState {
     fun closeDetail() {
         detailTitle = ""
         detailItems.clear()
+        detailSections.clear()
         detailError = null
         detailLoading = false
     }
