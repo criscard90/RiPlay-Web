@@ -1,0 +1,33 @@
+# Gradle / Kotlin
+.gradle/
+build/
+kotlin-js-store/
+.kotlin/
+out/
+*.class
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.hprof
+
+# Distribuzioni build locali (rigenerate in CI)
+composeApp/build/
+build/
+
+# Node / Wrangler
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+node_modules/
+.wrangler/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python dev server
+__pycache__/

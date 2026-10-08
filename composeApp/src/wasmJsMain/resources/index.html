@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RiPlay Web</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+    <style>
+        html, body, #ComposeTarget {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #111114;
+        }
+        /* Host per l'iframe del player YouTube (nascosto finché non serve) */
+        #riplay-player-host {
+            position: fixed;
+            right: 16px;
+            bottom: 96px;
+            width: 320px;
+            height: 180px;
+            z-index: 50;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,.55);
+            background: #000;
+            display: none;
+        }
+        #riplay-player-host.active { display: block; }
+        #riplay-player-host iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            pointer-events: none; /* il mini-player non intercetta i click sull'UI */
+        }
+        #riplay-player-host.expanded {
+            right: 50%;
+            transform: translateX(50%);
+            bottom: 96px;
+            width: 640px;
+            height: 360px;
+        }
+    </style>
+</head>
+<body>
+    <div id="ComposeTarget"></div>
+    <div id="riplay-player-host"></div>
+
+    <!-- Bridge del player: espone window.riplay usato da Kotlin/Wasm -->
+    <script src="bridge.js"></script>
+    <!-- YouTube IFrame Player API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+
+    <script src="riplay.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+name = "riplay-proxy"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# L'URL pubblico sarà https://riplay-proxy.<tuo-subdomain>.workers.dev
+# (oppure imposta workers_dev = false + route personalizzata)
+workers_dev = true
