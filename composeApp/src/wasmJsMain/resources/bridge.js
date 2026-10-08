@@ -22,20 +22,30 @@
     var host = null;
 
     function ensureHost() {
-        if (!host) {
-            host = document.getElementById('riplay-player-host');
+        // Re-query ad ogni chiamata: ComposeViewport rimuove i figli esistenti
+        // del suo container, quindi l'host può sparire dal DOM (o risultare stale).
+        host = document.getElementById('riplay-player-host');
+        if (!host && document.body) {
+            // Ricrea l'host se qualcuno lo ha rimosso (stili: #riplay-player-host in index.html)
+            host = document.createElement('div');
+            host.id = 'riplay-player-host';
+            document.body.appendChild(host);
         }
         return host;
     }
 
     function createPlayer(videoId) {
-        ensureHost();
-        host.classList.add('active');
+        var h = ensureHost();
+        if (!h) {
+            console.warn('[RiPlay] player host unavailable, cannot create player');
+            return;
+        }
+        h.classList.add('active');
         // YT.Player SOSTITUISCE l'elemento ricevuto con un iframe:
         // creiamo un div interno così #riplay-player-host resta nostro.
         var inner = document.createElement('div');
-        host.innerHTML = '';
-        host.appendChild(inner);
+        h.innerHTML = '';
+        h.appendChild(inner);
         state.player = new YT.Player(inner, {
             videoId: videoId,
             playerVars: {
