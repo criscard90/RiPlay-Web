@@ -4,14 +4,23 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class Song(
-    val id: String,                 // videoId YouTube
+    val id: String,                 // videoId YouTube (o "browse:XXX" per album/playlist)
     val title: String,
     val artist: String = "",
     val album: String = "",
     val duration: Int = 0,          // secondi
     val thumbnail: String = "",
     val isExplicit: Boolean = false,
+    // Campi estesi dal worker (ignora sconosciuti in lettura grazie a ignoreUnknownKeys)
+    val kind: String = "song",      // song | album | artist | playlist | video
+    val browseId: String? = null,   // per aprire artista/album
+    val videoId: String? = null,    // videoId diretto quando disponibile
 ) {
+    /** Vere tracce riproducibili (con videoId) */
+    val isPlayable: Boolean get() = (videoId ?: id.takeIf { !it.startsWith("browse:") }) != null
+    /** Id da passare al player */
+    val playId: String get() = videoId ?: id
+
     val durationText: String
         get() {
             val h = duration / 3600
@@ -24,6 +33,21 @@ data class Song(
 }
 
 @Serializable
+data class FeaturedArtist(
+    val title: String = "",
+    val browseId: String? = null,
+    val subtitle: String = "",
+    val thumbnail: String = "",
+)
+
+@Serializable
 data class SearchResponse(
     val items: List<Song> = emptyList(),
+    val featured: FeaturedArtist? = null,
+)
+
+@Serializable
+data class BrowseResponse(
+    val items: List<Song> = emptyList(),
+    val title: String = "",
 )

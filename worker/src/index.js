@@ -1,8 +1,14 @@
 /**
- * RiPlay proxy — Cloudflare Worker (parte 1/2: costanti + parsing).
+ * RiPlay proxy — Cloudflare Worker.
  *
- * Ponte CORS: riceve GET /search?q=..., interroga InnerTube lato server
- * e restituisce JSON con header CORS aperti. Nessun dato salvato.
+ * Ponte CORS: riceve GET /search?q=...[&type=songs|videos|albums|artists],
+ * interroga YouTube Music (InnerTube) lato server e restituisce JSON
+ * con header CORS aperti. Nessun dato salvato, nessun tracking.
+ *
+ * Risponde anche:
+ *   GET /health              -> { ok: true }
+ *   GET /artist?browseId=... -> top brani dell'artista (per "vedi artista")
+ *   GET /album?browseId=...  -> brani dell'album
  */
 
 const INNERTUBE_API_KEY = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
@@ -24,6 +30,14 @@ const CLIENT = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
 };
 
+// Filtri di ricerca InnerTube (tab "Brani", "Video", "Album", "Artisti")
+const SEARCH_PARAMS = {
+  songs: "EgWKAQIIAWoQEAMQBBAJEAoQEBAKEAkEDBA",
+  videos: "EgWKAQIQAWoQEAMQBBAJEAoQEBAVEAkEDBA",
+  albums: "EgWKAQIYAWoQEAMQBBAJEAoQEBAVEAkEDBA",
+  artists: "EgWKAQIgAWoQEAMQBBAJEAoQEBAVEAkEDBA",
+};
+
 function thumb(thumbnails) {
   if (!thumbnails || thumbnails.length === 0) return "";
   return thumbnails[thumbnails.length - 1].url || "";
@@ -31,92 +45,112 @@ function thumb(thumbnails) {
 
 function parseLength(text) {
   if (!text) return 0;
-  const parts = text.split(":").map(Number);
+  const parts = String(text).split(":").map(Number);
   if (parts.some(isNaN)) return 0;
   let s = 0;
   for (const p of parts) s = s * 60 + p;
   return s;
 }
 
-
-/** Estrae i Song da una risposta InnerTube /search (parte 2/2: handler). */
-function extractSongs(data) {
-  const songs = [];
-  const tabs = data?.contents?.tabbedSearchResultsRenderer?.tabs ?? [];
-  for (const tab of tabs) {
-    const sections =
-      tab?.tabRenderer?.content?.sectionListRenderer?.contents ?? [];
-    for (const section of sections) {
-      const items =
-        section?.musicShelfRenderer?.contents ??
-        section?.musicCardShelfRenderer?.contents ?? [];
-      for (const item of items) {
-        const mrlm =
-          item?.musicResponsiveListItemRenderer ??
-          item?.musicTwoRowItemRenderer;
-        if (!mrlm) continue;
-        const flex = mrlm.flexColumns ?? [];
-        const title =
-          flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]
-            ?.text ?? mrlm.title?.runs?.[0]?.text ?? "";
-        // Colonna 2: "artista • album • durata" -> prendiamo solo il 1° run
-        const artistRuns =
-          flex[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [];
-        const artist = artistRuns.length > 0 ? (artistRuns[0].text ?? "") : (
-          mrlm.subtitle?.runs?.[0]?.text ?? "");
-        // Durata: ultimo run della colonna 2 che matcha M:SS / H:MM:SS
-        let lengthText = "";
-        for (const r of artistRuns) {
-          if (/^\d{1,2}:\d{2}(:\d{2})?$/.test((r.text ?? "").trim())) {
-            lengthText = r.text.trim();
-          }
-        }
-        if (!lengthText) {
-          lengthText =
-            mrlm.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer
-              ?.text?.runs?.[0]?.text ?? "";
-        }
-        const thumbs =
-          mrlm.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ??
-          mrlm.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail
-            ?.thumbnails ?? [];
-        let videoId =
-          mrlm.overlay?.musicItemThumbnailOverlayRenderer?.content
-            ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint
-            ?.videoId ??
-          mrlm.navigationEndpoint?.watchEndpoint?.videoId ??
-          mrlm.onTap?.watchEndpoint?.videoId ?? null;
-        if (!videoId) {
-          const runs =
-            flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [];
-          for (const r of runs) {
-            const id = r?.navigationEndpoint?.watchEndpoint?.videoId ?? null;
-            if (id) { videoId = id; break; }
-          }
-        }
-        if (videoId && title) {
-          songs.push({
-            id: videoId, title, artist: artist || "", album: "",
-            duration: parseLength(lengthText),
-            thumbnail: thumb(thumbs), isExplicit: false,
-          });
-        }
-      }
-    }
-  }
-  return songs;
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS },
+  });
 }
 
-async function handleSearch(url) {
-  const q = (url.searchParams.get("q") || "").trim();
-  if (!q) {
-    return new Response(JSON.stringify({ items: [] }), {
-      status: 200,
-      headers: { "Content-Type": "application/json", ...CORS },
-    });
+/** Raccoglie ricorsivamente tutti gli item musicali ovunque siano annidati. */
+function collectItems(root) {
+  const out = [];
+  (function walk(o) {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) {
+      for (const v of o) walk(v);
+      return;
+    }
+    if (o.musicResponsiveListItemRenderer) out.push(o.musicResponsiveListItemRenderer);
+    else if (o.musicTwoRowItemRenderer) out.push(o.musicTwoRowItemRenderer);
+    for (const k of Object.keys(o)) {
+      if (k === "musicResponsiveListItemRenderer" || k === "musicTwoRowItemRenderer") continue;
+      walk(o[k]);
+    }
+  })(root);
+  return out;
+}
+
+/** Tipo + browseId di un item (brano / album / artista / playlist / video). */
+function itemKind(m) {
+  const sub = (m.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [])
+    .map((x) => x.text).join("");
+  const first = sub.split("•")[0].trim().toLowerCase();
+  const browse =
+    m.navigationEndpoint?.browseEndpoint?.browseId ??
+    m.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]
+      ?.navigationEndpoint?.browseEndpoint?.browseId ?? null;
+  if (browse?.startsWith("UC")) return { kind: "artist", browseId: browse };
+  if (browse?.startsWith("MPRE")) return { kind: "album", browseId: browse };
+  if (browse?.startsWith("VL") || browse?.startsWith("PL")) return { kind: "playlist", browseId: browse };
+  if (first.startsWith("album")) return { kind: "album", browseId: browse };
+  if (first.startsWith("singolo") || first.startsWith("single") || first.startsWith("ep"))
+    return { kind: "album", browseId: browse };
+  if (first.startsWith("artist")) return { kind: "artist", browseId: browse };
+  if (first.startsWith("playlist")) return { kind: "playlist", browseId: browse };
+  return { kind: "song", browseId: null };
+}
+
+function extractVideoId(m) {
+  return (
+    m.overlay?.musicItemThumbnailOverlayRenderer?.content
+      ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId ??
+    m.navigationEndpoint?.watchEndpoint?.videoId ??
+    m.onTap?.watchEndpoint?.videoId ?? null
+  );
+}
+
+
+
+/** Converte un item InnerTube nel nostro Song (+ tipo per la UI). */
+function toSong(m) {
+  const flex = m.flexColumns ?? [];
+  const title =
+    flex[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text ??
+    m.title?.runs?.[0]?.text ?? "";
+  const artistRuns =
+    flex[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [];
+  const artist = artistRuns.length > 0
+    ? (artistRuns[0].text ?? "")
+    : (m.subtitle?.runs?.[0]?.text ?? "");
+  let lengthText = "";
+  for (const r of artistRuns) {
+    const t = (r.text ?? "").trim();
+    if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) lengthText = t;
   }
+  if (!lengthText) {
+    lengthText =
+      m.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer
+        ?.text?.runs?.[0]?.text ?? "";
+  }
+  const thumbs =
+    m.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ??
+    m.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
+  const { kind, browseId } = itemKind(m);
+  return {
+    id: extractVideoId(m) ?? (browseId ? `browse:${browseId}` : ""),
+    title,
+    artist,
+    album: "",
+    duration: parseLength(lengthText),
+    thumbnail: thumb(thumbs),
+    isExplicit: false,
+    kind,
+    browseId,
+    videoId: extractVideoId(m),
+  };
+}
+
+async function innerTube(path, body) {
   const res = await fetch(
-    `${INNERTUBE_HOST}/youtubei/v1/search?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
+    `${INNERTUBE_HOST}/youtubei/v1/${path}?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
     {
       method: "POST",
       headers: {
@@ -125,20 +159,104 @@ async function handleSearch(url) {
         Origin: INNERTUBE_HOST,
         Referer: `${INNERTUBE_HOST}/`,
       },
-      body: JSON.stringify({ context: { client: CLIENT }, query: q }),
+      body: JSON.stringify({ context: { client: CLIENT }, ...body }),
     }
   );
-  if (!res.ok) {
-    return new Response(JSON.stringify({ error: "upstream HTTP " + res.status }), {
-      status: 502,
-      headers: { "Content-Type": "application/json", ...CORS },
-    });
+  if (!res.ok) throw new Error(`upstream HTTP ${res.status}`);
+  return res.json();
+}
+
+async function handleSearch(url) {
+  const q = (url.searchParams.get("q") || "").trim();
+  const type = (url.searchParams.get("type") || "").trim();
+  if (!q) return json({ items: [] });
+  const params = SEARCH_PARAMS[type] || undefined;
+  const body = params ? { query: q, params } : { query: q };
+  const data = await innerTube("search", body);
+
+  // Artista in evidenza (card in alto)
+  let featured = null;
+  const card = collectCard(data);
+  if (card) featured = toFeatured(card);
+
+  const items = [];
+  const seen = new Set();
+  for (const m of collectItems(data)) {
+    const s = toSong(m);
+    if (!s.title || !s.id || seen.has(s.id)) continue;
+    seen.add(s.id);
+    items.push(s);
   }
-  const data = await res.json();
-  return new Response(JSON.stringify({ items: extractSongs(data) }), {
-    status: 200,
-    headers: { "Content-Type": "application/json", ...CORS },
-  });
+  return json({ items, featured });
+}
+
+/** Card artista in alto nei risultati (nome, iscritti, thumbnail, browseId). */
+function collectCard(data) {
+  let found = null;
+  (function walk(o) {
+    if (!o || typeof o !== "object" || found) return;
+    if (Array.isArray(o)) {
+      for (const v of o) walk(v);
+      return;
+    }
+    if (o.musicCardShelfRenderer) {
+      found = o.musicCardShelfRenderer;
+      return;
+    }
+    for (const v of Object.values(o)) walk(v);
+  })(data?.contents);
+  return found;
+}
+
+function toFeatured(card) {
+  const title = card.title?.runs?.[0]?.text ?? "";
+  const browseId =
+    card.title?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId ?? null;
+  const subtitle = (card.subtitle?.runs ?? []).map((r) => r.text).join("");
+  const thumbs =
+    card.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
+  return { title, browseId, subtitle, thumbnail: thumb(thumbs) };
+}
+
+/** Top brani di un artista / brani di un album via /browse. */
+async function handleBrowse(url, kind) {
+  const browseId = (url.searchParams.get("browseId") || "").trim();
+  if (!browseId) return json({ error: "missing browseId" }, 400);
+  const data = await innerTube("browse", { browseId });
+  const items = [];
+  const seen = new Set();
+  for (const m of collectItems(data)) {
+    const s = toSong(m);
+    if (!s.title || !s.videoId || seen.has(s.videoId)) continue;
+    seen.add(s.videoId);
+    s.id = s.videoId;
+    s.kind = "song";
+    items.push(s);
+  }
+  const header = headerTitle(data);
+  return json({ items, title: header });
+}
+
+function headerTitle(data) {
+  let title = "";
+  (function walk(o) {
+    if (!o || typeof o !== "object" || title) return;
+    if (Array.isArray(o)) {
+      for (const v of o) walk(v);
+      return;
+    }
+    if (o.musicDetailHeaderRenderer) {
+      title = o.musicDetailHeaderRenderer.title?.runs?.[0]?.text ?? "";
+      return;
+    }
+    if (o.musicEditablePlaylistDetailHeaderRenderer) {
+      title = o.musicEditablePlaylistDetailHeaderRenderer.header
+        ?.musicDetailHeaderRenderer?.title?.runs?.[0]?.text ?? "";
+      return;
+    }
+    for (const v of Object.values(o)) walk(v);
+  })(data?.contents ?? data);
+  return title;
 }
 
 export default {
@@ -147,18 +265,19 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
     }
-    if (url.pathname === "/search" && request.method === "GET") {
-      return handleSearch(url);
+    try {
+      if (url.pathname === "/search" && request.method === "GET") {
+        return await handleSearch(url);
+      }
+      if ((url.pathname === "/artist" || url.pathname === "/album") && request.method === "GET") {
+        return await handleBrowse(url, url.pathname.slice(1));
+      }
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return json({ ok: true, service: "riplay-proxy" });
+      }
+      return json({ error: "not found" }, 404);
+    } catch (e) {
+      return json({ error: String(e.message || e) }, 502);
     }
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({ ok: true, service: "riplay-proxy" }),
-        { status: 200, headers: { "Content-Type": "application/json", ...CORS } }
-      );
-    }
-    return new Response(JSON.stringify({ error: "not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json", ...CORS },
-    });
   },
 };

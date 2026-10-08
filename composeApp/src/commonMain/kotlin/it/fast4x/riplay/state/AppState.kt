@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import it.fast4x.riplay.api.ApiClient
+import it.fast4x.riplay.model.FeaturedArtist
 import it.fast4x.riplay.model.Song
 import it.fast4x.riplay.player.WebPlayer
 import it.fast4x.riplay.storage.LocalStore
@@ -22,8 +23,16 @@ class AppState {
     // --- Ricerca ---
     var searchQuery by mutableStateOf("")
     var searchResults = mutableStateListOf<Song>()
+    var featuredArtist by mutableStateOf<FeaturedArtist?>(null)
     var searchLoading by mutableStateOf(false)
     var searchError by mutableStateOf<String?>(null)
+    var searchFilter by mutableStateOf<String?>(null) // null=tutto, songs|videos|albums|artists
+
+    // --- Dettaglio artista/album ---
+    var detailTitle by mutableStateOf("")
+    var detailItems = mutableStateListOf<Song>()
+    var detailLoading by mutableStateOf(false)
+    var detailError by mutableStateOf<String?>(null)
 
     // --- Coda di riproduzione ---
     val queue = mutableStateListOf<Song>()
@@ -50,34 +59,72 @@ class AppState {
 
     // ================= Ricerca =================
 
-    suspend fun search(query: String) {
+    suspend fun search(query: String, filter: String? = searchFilter) {
         searchQuery = query
+        searchFilter = filter
+        // Nuova ricerca -> chiudi eventuale dettaglio
+        closeDetail()
         searchLoading = true
         searchError = null
         try {
-            val results = ApiClient.search(query)
+            val response = ApiClient.search(query, filter)
             searchResults.clear()
-            searchResults.addAll(results)
+            searchResults.addAll(response.items)
+            featuredArtist = response.featured?.takeIf { it.title.isNotBlank() }
         } catch (e: Exception) {
             searchError = e.message ?: "Errore di rete"
             searchResults.clear()
+            featuredArtist = null
         } finally {
             searchLoading = false
         }
     }
 
+    // ================= Dettaglio artista/album =================
+
+    /** Apre artista (browseId UC...) o album (browseId MPRE...) */
+    suspend fun openDetail(kind: String, browseId: String, fallbackTitle: String = "") {
+        detailTitle = fallbackTitle
+        detailItems.clear()
+        detailError = null
+        detailLoading = true
+        try {
+            val response = if (kind == "artist") ApiClient.artist(browseId)
+            else ApiClient.album(browseId)
+            detailItems.clear()
+            detailItems.addAll(response.items)
+            if (response.title.isNotBlank()) detailTitle = response.title
+            else if (detailTitle.isBlank()) detailTitle = fallbackTitle
+        } catch (e: Exception) {
+            detailError = e.message ?: "Errore di rete"
+        } finally {
+            detailLoading = false
+        }
+    }
+
+    fun closeDetail() {
+        detailTitle = ""
+        detailItems.clear()
+        detailError = null
+        detailLoading = false
+    }
+
+    val isDetailOpen: Boolean get() = detailTitle.isNotBlank() || detailItems.isNotEmpty() || detailLoading
+
     // ================= Coda / playback =================
 
     /** Avvia la riproduzione di song, usando items come coda (se fornita) */
     fun play(song: Song, items: List<Song>? = null) {
-        if (items != null) {
+        if (!song.isPlayable) return
+        val playable = items?.filter { it.isPlayable }
+        if (playable != null) {
             queue.clear()
-            queue.addAll(items)
+            queue.addAll(playable)
         } else if (!queue.contains(song)) {
             queue.add(song)
         }
         queueIndex = queue.indexOf(song).let { if (it >= 0) it else queue.lastIndex }
-        WebPlayer.load(song.id)
+        WebPlayer.load(song.playId)
         WebPlayer.showHost()
         persistQueue()
     }
@@ -90,7 +137,7 @@ class AppState {
     fun next() {
         if (queueIndex < queue.lastIndex) {
             queueIndex++
-            WebPlayer.load(queue[queueIndex].id)
+            WebPlayer.load(queue[queueIndex].playId)
             WebPlayer.showHost()
             persistQueue()
         }
@@ -102,7 +149,7 @@ class AppState {
             WebPlayer.seek(0.0)
         } else if (queueIndex > 0) {
             queueIndex--
-            WebPlayer.load(queue[queueIndex].id)
+            WebPlayer.load(queue[queueIndex].playId)
             WebPlayer.showHost()
             persistQueue()
         }

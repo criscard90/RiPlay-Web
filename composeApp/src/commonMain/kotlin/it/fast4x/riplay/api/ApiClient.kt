@@ -7,6 +7,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
+import it.fast4x.riplay.model.BrowseResponse
 import it.fast4x.riplay.model.SearchResponse
 import it.fast4x.riplay.model.Song
 import kotlinx.serialization.json.Json
@@ -19,10 +20,9 @@ private fun resolveBaseUrl(): String = js("window.__RIPLAY_API__ || 'http://loca
  * Client HTTP verso il Cloudflare Worker (proxy CORS verso InnerTube).
  *
  * Il worker espone:
- *   GET {base}/search?q=QUERY      -> SearchResponse (JSON)
- *
- * In sviluppo locale si imposta http://localhost:8787
- * In produzione l'URL del worker (es. https://riplay-proxy.tuo-sub.workers.dev)
+ *   GET {base}/search?q=QUERY[&type=songs|videos|albums|artists] -> SearchResponse
+ *   GET {base}/artist?browseId=UC... -> BrowseResponse (top brani artista)
+ *   GET {base}/album?browseId=MPRE... -> BrowseResponse (brani album)
  */
 object ApiClient {
 
@@ -41,14 +41,33 @@ object ApiClient {
         }
     }
 
-    suspend fun search(query: String): List<Song> {
-        if (query.isBlank()) return emptyList()
+    suspend fun search(query: String, type: String? = null): SearchResponse {
+        if (query.isBlank()) return SearchResponse()
         val response = client.get("$baseUrl/search") {
             parameter("q", query)
+            if (type != null) parameter("type", type)
         }
         if (response.status != HttpStatusCode.OK) {
             throw IllegalStateException("API error: HTTP ${response.status.value}")
         }
-        return response.body<SearchResponse>().items
+        return response.body<SearchResponse>()
+    }
+
+    /** Top brani di un artista (browseId UC...) */
+    suspend fun artist(browseId: String): BrowseResponse =
+        browse("artist", browseId)
+
+    /** Brani di un album (browseId MPRE...) */
+    suspend fun album(browseId: String): BrowseResponse =
+        browse("album", browseId)
+
+    private suspend fun browse(endpoint: String, browseId: String): BrowseResponse {
+        val response = client.get("$baseUrl/$endpoint") {
+            parameter("browseId", browseId)
+        }
+        if (response.status != HttpStatusCode.OK) {
+            throw IllegalStateException("API error: HTTP ${response.status.value}")
+        }
+        return response.body<BrowseResponse>()
     }
 }
